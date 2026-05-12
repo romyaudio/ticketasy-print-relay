@@ -2,9 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:http/http.dart' as http;
 import 'printer_service.dart';
 
 enum ConnectionStatus { disconnected, connecting, connected, error }
+
+const String agentVersion = '1.0.0';
 
 class RelayService extends ChangeNotifier {
   WebSocketChannel? _channel;
@@ -13,6 +16,7 @@ class RelayService extends ChangeNotifier {
   Timer? _heartbeatTimer;
   Timer? _reconnectTimer;
   int _reconnectAttempts = 0;
+  String? _updateAvailable; // null = no update, otherwise = new version
   String? _serverUrl;
   String? _token;
   bool _isShuttingDown = false;
@@ -23,6 +27,7 @@ class RelayService extends ChangeNotifier {
   // === Public getters ===
   ConnectionStatus get status => _status;
   String get lastError => _lastError;
+  String? get updateAvailable => _updateAvailable;
   List<String> get logs => List.unmodifiable(_logs);
   PrinterService get printerService => _printerService;
 
@@ -210,6 +215,7 @@ class RelayService extends ChangeNotifier {
           _reconnectAttempts = 0;
           _addLog('✅ Registrado como estación ${message['stationId']}');
           _startHeartbeat();
+          _checkForUpdates();
           notifyListeners();
           break;
 
@@ -299,6 +305,27 @@ class RelayService extends ChangeNotifier {
     );
     _addLog('Reconectando en ${delay.inSeconds}s...');
     _reconnectTimer = Timer(delay, _doConnect);
+  }
+
+  /// Check GitHub Releases for a newer version
+  Future<void> _checkForUpdates() async {
+    try {
+      final response = await http.get(
+        Uri.parse('https://api.github.com/repos/romyaudio/ticketasy-print-relay/releases/latest'),
+        headers: {'Accept': 'application/vnd.github.v3+json'},
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final latestTag = (data['tag_name'] as String?)?.replaceFirst('v', '') ?? '';
+        if (latestTag.isNotEmpty && latestTag != agentVersion) {
+          _updateAvailable = latestTag;
+          _addLog('⬆️ Actualización disponible: v$latestTag');
+          notifyListeners();
+        }
+      }
+    } catch (_) {
+      // Silent fail - not critical
+    }
   }
 
   void _addLog(String message) {

@@ -59,6 +59,8 @@ final Map<AppLanguage, Map<String, String>> _translations = {
     'dialog.save': 'Guardar',
     'dialog.printerChanged': 'Impresora cambiada a:',
     'printer.configured': 'Configurada',
+    'update.available': 'Nueva versión disponible:',
+    'update.download': 'Descargar',
   },
   AppLanguage.en: {
     'app.title': 'Ticket Ventas Print',
@@ -103,6 +105,8 @@ final Map<AppLanguage, Map<String, String>> _translations = {
     'dialog.save': 'Save',
     'dialog.printerChanged': 'Printer changed to:',
     'printer.configured': 'Configured',
+    'update.available': 'New version available:',
+    'update.download': 'Download',
   },
   AppLanguage.pt: {
     'app.title': 'Ticket Ventas Print',
@@ -147,5 +151,7 @@ final Map<AppLanguage, Map<String, String>> _translations = {
     'dialog.save': 'Salvar',
     'dialog.printerChanged': 'Impressora alterada para:',
     'printer.configured': 'Configurada',
+    'update.available': 'Nova versão disponível:',
+    'update.download': 'Baixar',
   },
 };

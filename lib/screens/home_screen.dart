@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
@@ -672,6 +673,41 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Update banner
+          if (_relay.updateAvailable != null)
+            Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.orange.shade300),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.system_update, size: 18, color: Colors.orange),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '${t('update.available')} v${_relay.updateAvailable}',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF1A1A2E)),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      // Open GitHub releases page
+                      Process.run('cmd', ['/c', 'start', 'https://github.com/romyaudio/ticketasy-print-relay/releases/latest']);
+                    },
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      minimumSize: Size.zero,
+                    ),
+                    child: Text(t('update.download'), style: const TextStyle(fontSize: 11)),
+                  ),
+                ],
+              ),
+            ),
+
           // Status card
           Container(
             padding: const EdgeInsets.all(16),

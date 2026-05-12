@@ -23,6 +23,7 @@ void main() async {
   );
 
   windowManager.waitUntilReadyToShow(windowOptions, () async {
+    await windowManager.setPreventClose(true);
     await windowManager.show();
     await windowManager.focus();
   });
@@ -88,6 +89,8 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   /// Minimize to tray instead of closing
   @override
   void onWindowClose() async {
+    // Prevent the window from actually closing - just hide it
+    await windowManager.setPreventClose(true);
     await windowManager.hide();
   }
 
@@ -128,6 +131,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       MenuSeparator(),
       MenuItemLabel(label: 'Salir', onClicked: (menuItem) async {
         _relayService.disconnect();
+        await windowManager.setPreventClose(false);
         await windowManager.destroy();
       }),
     ]);
