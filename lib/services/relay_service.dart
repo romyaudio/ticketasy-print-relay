@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'package:http/http.dart' as http;
 import 'printer_service.dart';
 
@@ -10,13 +10,10 @@ enum ConnectionStatus { disconnected, connecting, connected, error }
 const String agentVersion = '1.0.0';
 
 class RelayService extends ChangeNotifier {
-  WebSocketChannel? _channel;
+  IO.Socket? _socket;
   ConnectionStatus _status = ConnectionStatus.disconnected;
   String _lastError = '';
-  Timer? _heartbeatTimer;
-  Timer? _reconnectTimer;
-  int _reconnectAttempts = 0;
-  String? _updateAvailable; // null = no update, otherwise = new version
+  String? _updateAvailable;
   String? _serverUrl;
   String? _token;
   bool _isShuttingDown = false;
@@ -31,7 +28,7 @@ class RelayService extends ChangeNotifier {
   List<String> get logs => List.unmodifiable(_logs);
   PrinterService get printerService => _printerService;
 
-  /// Connect to the backend WebSocket
+  /// Connect to the backend via Socket.IO /print namespace
   void connect({required String serverUrl, required String token}) {
     _serverUrl = serverUrl;
     _token = token;
@@ -52,74 +49,79 @@ class RelayService extends ChangeNotifier {
     final completer = Completer<Map<String, dynamic>?>();
 
     try {
-      final uri = Uri.parse(serverUrl);
-      _channel = WebSocketChannel.connect(uri);
-      await _channel!.ready;
+      _socket?.dispose();
 
-      // Send activation message
-      _channel!.sink.add(jsonEncode({
-        'type': 'activate',
-        'setupCode': setupCode,
-      }));
-
-      // Listen for all messages
-      _channel!.stream.listen(
-        (data) {
-          try {
-            final message = jsonDecode(data as String);
-
-            if (!completer.isCompleted && (message['type'] == 'activated' || message['type'] == 'connected')) {
-              _addLog('✅ Activación exitosa');
-              _status = ConnectionStatus.connected;
-              _reconnectAttempts = 0;
-              if (message['connectionToken'] != null) {
-                _token = message['connectionToken'];
-              }
-              _startHeartbeat();
-              notifyListeners();
-              if (!completer.isCompleted) {
-                completer.complete({
-                  'connectionToken': message['connectionToken'] ?? _token ?? '',
-                  'stationId': message['stationId'] ?? '',
-                  'companyId': message['companyId'] ?? '',
-                  'locationId': message['locationId'] ?? '',
-                });
-              }
-            } else if (!completer.isCompleted && message['type'] == 'error') {
-              _lastError = message['message'] ?? 'Error desconocido';
-              _addLog('❌ Error: $_lastError');
-              _status = ConnectionStatus.error;
-              notifyListeners();
-              completer.complete(null);
-            } else {
-              // Handle normal messages after activation
-              _onMessage(data);
-            }
-          } catch (e) {
-            if (!completer.isCompleted) {
-              _lastError = e.toString();
-              completer.complete(null);
-            }
-          }
-        },
-        onError: (error) {
-          _addLog('Error: $error');
-          _status = ConnectionStatus.error;
-          _lastError = error.toString();
-          notifyListeners();
-          if (!completer.isCompleted) completer.complete(null);
-          _scheduleReconnect();
-        },
-        onDone: () {
-          _heartbeatTimer?.cancel();
-          if (!_isShuttingDown) {
-            _addLog('Desconectado. Reconectando...');
-            _status = ConnectionStatus.disconnected;
-            notifyListeners();
-            _scheduleReconnect();
-          }
-        },
+      _socket = IO.io(
+        '$serverUrl/print',
+        IO.OptionBuilder()
+            .setTransports(['websocket'])
+            .enableAutoConnect()
+            .disableReconnection()
+            .build(),
       );
+
+      _socket!.onConnect((_) {
+        _addLog('Conectado, enviando código de activación...');
+        _socket!.emit('activate', {'setupCode': setupCode});
+      });
+
+      _socket!.on('activated', (data) {
+        if (!completer.isCompleted) {
+          _addLog('✅ Activación exitosa');
+          _token = data['connectionToken'];
+          _status = ConnectionStatus.connected;
+          notifyListeners();
+          _checkForUpdates();
+          completer.complete({
+            'connectionToken': data['connectionToken'] ?? '',
+            'stationId': data['stationId'] ?? '',
+            'companyId': data['companyId'] ?? '',
+            'locationId': data['locationId'] ?? '',
+          });
+        }
+      });
+
+      _socket!.on('connected', (data) {
+        if (!completer.isCompleted) {
+          _addLog('✅ Registrado como estación ${data['stationId']}');
+          _status = ConnectionStatus.connected;
+          notifyListeners();
+          _checkForUpdates();
+          completer.complete({
+            'connectionToken': _token ?? '',
+            'stationId': data['stationId'] ?? '',
+          });
+        }
+      });
+
+      _socket!.on('error', (data) {
+        final message = data is Map ? (data['message'] ?? 'Error desconocido') : data.toString();
+        _lastError = message;
+        _addLog('❌ Error: $_lastError');
+        _status = ConnectionStatus.error;
+        notifyListeners();
+        if (!completer.isCompleted) completer.complete(null);
+      });
+
+      _socket!.onConnectError((error) {
+        _lastError = error.toString();
+        _addLog('❌ Error de conexión: $_lastError');
+        _status = ConnectionStatus.error;
+        notifyListeners();
+        if (!completer.isCompleted) completer.complete(null);
+      });
+
+      _socket!.onDisconnect((_) {
+        if (!completer.isCompleted) {
+          _lastError = 'Desconectado durante activación';
+          _status = ConnectionStatus.disconnected;
+          notifyListeners();
+          completer.complete(null);
+        }
+      });
+
+      // Setup event listeners for print commands (in case activation leads to immediate registration)
+      _setupPrintListeners();
 
       // Timeout
       Future.delayed(const Duration(seconds: 15), () {
@@ -145,10 +147,8 @@ class RelayService extends ChangeNotifier {
   /// Disconnect
   void disconnect() {
     _isShuttingDown = true;
-    _heartbeatTimer?.cancel();
-    _reconnectTimer?.cancel();
-    _channel?.sink.close();
-    _channel = null;
+    _socket?.dispose();
+    _socket = null;
     _status = ConnectionStatus.disconnected;
     notifyListeners();
   }
@@ -163,96 +163,109 @@ class RelayService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final uri = Uri.parse('$_serverUrl?token=$_token');
-      _channel = WebSocketChannel.connect(uri);
+      _socket?.dispose();
 
-      _channel!.stream.listen(
-        _onMessage,
-        onError: (error) {
-          _addLog('Error: $error');
-          _status = ConnectionStatus.error;
-          _lastError = error.toString();
-          notifyListeners();
-          _scheduleReconnect();
-        },
-        onDone: () {
-          _heartbeatTimer?.cancel();
-          if (!_isShuttingDown) {
-            _addLog('Desconectado. Reconectando...');
-            _status = ConnectionStatus.disconnected;
-            notifyListeners();
-            _scheduleReconnect();
-          }
-        },
+      _socket = IO.io(
+        '$_serverUrl/print',
+        IO.OptionBuilder()
+            .setTransports(['websocket'])
+            .setAuth({'token': _token!})
+            .enableAutoConnect()
+            .enableReconnection()
+            .setReconnectionDelay(2000)
+            .setReconnectionDelayMax(5000)
+            .build(),
       );
 
-      // Wait a moment then assume connected (WebSocket doesn't have onOpen in this lib)
-      Future.delayed(const Duration(seconds: 1), () {
-        if (_status == ConnectionStatus.connecting) {
-          _status = ConnectionStatus.connected;
-          _reconnectAttempts = 0;
-          _addLog('✅ Conectado');
-          _startHeartbeat();
+      _socket!.onConnect((_) {
+        _status = ConnectionStatus.connected;
+        _addLog('✅ Conectado');
+        notifyListeners();
+      });
+
+      _socket!.on('connected', (data) {
+        _status = ConnectionStatus.connected;
+        _addLog('✅ Registrado como estación ${data['stationId']}');
+        _checkForUpdates();
+        notifyListeners();
+      });
+
+      _socket!.onDisconnect((_) {
+        if (!_isShuttingDown) {
+          _addLog('Desconectado. Reconectando automáticamente...');
+          _status = ConnectionStatus.disconnected;
           notifyListeners();
         }
       });
+
+      _socket!.onReconnect((_) {
+        _addLog('✅ Reconectado');
+        _status = ConnectionStatus.connected;
+        notifyListeners();
+      });
+
+      _socket!.onReconnectAttempt((attempt) {
+        _addLog('Reintento de conexión #$attempt...');
+      });
+
+      _socket!.onConnectError((error) {
+        _lastError = error.toString();
+        _addLog('Error de conexión: $_lastError');
+        _status = ConnectionStatus.error;
+        notifyListeners();
+      });
+
+      _socket!.on('error', (data) {
+        final message = data is Map ? (data['message'] ?? 'Error') : data.toString();
+        _lastError = message;
+        _addLog('Error: $_lastError');
+        _status = ConnectionStatus.error;
+        notifyListeners();
+      });
+
+      _setupPrintListeners();
     } catch (e) {
       _lastError = e.toString();
       _addLog('Error de conexión: $_lastError');
       _status = ConnectionStatus.error;
       notifyListeners();
-      _scheduleReconnect();
     }
   }
 
-  void _onMessage(dynamic data) {
-    try {
-      final message = jsonDecode(data as String);
+  void _setupPrintListeners() {
+    if (_socket == null) return;
 
-      switch (message['type']) {
-        case 'connected':
-          _status = ConnectionStatus.connected;
-          _reconnectAttempts = 0;
-          _addLog('✅ Registrado como estación ${message['stationId']}');
-          _startHeartbeat();
-          _checkForUpdates();
-          notifyListeners();
-          break;
+    _socket!.on('print:receipt', (data) {
+      _addLog('🖨️ Recibo recibido - imprimiendo...');
+      _handlePrint(
+        Map<String, dynamic>.from(data['data'] ?? {}),
+        data['format'] is Map ? Map<String, dynamic>.from(data['format']) : {'type': data['format'] ?? 'escpos'},
+      );
+    });
 
-        case 'heartbeat_ack':
-          break;
+    _socket!.on('print:test', (data) {
+      _addLog('🖨️ Prueba de impresión recibida');
+      _handleTestPrint(Map<String, dynamic>.from(data['data'] ?? {}));
+    });
 
-        case 'print:receipt':
-          _addLog('🖨️ Recibo recibido - imprimiendo...');
-          _handlePrint(message['data'], message['format']);
-          break;
+    _socket!.on('open:drawer', (_) {
+      _addLog('💰 Abriendo cajón');
+      _handleOpenDrawer();
+    });
 
-        case 'print:test':
-          _addLog('🖨️ Prueba de impresión recibida');
-          _handleTestPrint(message['data']);
-          break;
-
-        case 'open:drawer':
-          _addLog('💰 Abriendo cajón');
-          _handleOpenDrawer();
-          break;
-
-        default:
-          _addLog('Mensaje: ${message['type']}');
-      }
-    } catch (e) {
-      _addLog('Error procesando mensaje: $e');
-    }
+    _socket!.on('heartbeat_ack', (_) {
+      // Socket.IO handles ping/pong internally, this is just for app-level ack
+    });
   }
 
   void _handlePrint(Map<String, dynamic> receiptData, Map<String, dynamic> format) async {
     try {
       await _printerService.printReceipt(receiptData, format);
-      _sendMessage({'type': 'print:completed'});
+      _socket?.emit('print:completed', {'status': 'ok'});
       _addLog('✅ Recibo impreso');
       notifyListeners();
     } catch (e) {
-      _sendMessage({'type': 'print:error', 'error': e.toString()});
+      _socket?.emit('print:error', {'error': e.toString()});
       _addLog('❌ Error imprimiendo: $e');
       notifyListeners();
     }
@@ -261,11 +274,11 @@ class RelayService extends ChangeNotifier {
   void _handleTestPrint(Map<String, dynamic> data) async {
     try {
       await _printerService.printTest(data);
-      _sendMessage({'type': 'print:completed'});
+      _socket?.emit('print:completed', {'status': 'ok'});
       _addLog('✅ Prueba impresa');
       notifyListeners();
     } catch (e) {
-      _sendMessage({'type': 'print:error', 'error': e.toString()});
+      _socket?.emit('print:error', {'error': e.toString()});
       _addLog('❌ Error en prueba: $e');
       notifyListeners();
     }
@@ -274,37 +287,14 @@ class RelayService extends ChangeNotifier {
   void _handleOpenDrawer() async {
     try {
       await _printerService.openDrawer();
-      _sendMessage({'type': 'print:completed'});
+      _socket?.emit('print:completed', {'status': 'ok'});
       _addLog('✅ Cajón abierto');
       notifyListeners();
     } catch (e) {
-      _sendMessage({'type': 'print:error', 'error': e.toString()});
+      _socket?.emit('print:error', {'error': e.toString()});
       _addLog('❌ Error abriendo cajón: $e');
       notifyListeners();
     }
-  }
-
-  void _sendMessage(Map<String, dynamic> message) {
-    if (_channel != null) {
-      _channel!.sink.add(jsonEncode(message));
-    }
-  }
-
-  void _startHeartbeat() {
-    _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      _sendMessage({'type': 'heartbeat'});
-    });
-  }
-
-  void _scheduleReconnect() {
-    if (_isShuttingDown) return;
-    _reconnectAttempts++;
-    final delay = Duration(
-      seconds: (_reconnectAttempts * 2).clamp(1, 30),
-    );
-    _addLog('Reconectando en ${delay.inSeconds}s...');
-    _reconnectTimer = Timer(delay, _doConnect);
   }
 
   /// Check GitHub Releases for a newer version

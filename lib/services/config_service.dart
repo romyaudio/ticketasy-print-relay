@@ -6,8 +6,8 @@ class ConfigService {
   // Default server URL (set via --dart-define=ENV=dev or ENV=prod at build time)
   static const String _env = String.fromEnvironment('ENV', defaultValue: 'dev');
   static const String _defaultServerUrl = _env == 'prod'
-      ? 'wss://ticketventas.com/ws/print'
-      : 'ws://localhost:3010/ws/print';
+      ? 'https://ticketventas.com'
+      : 'http://localhost:3010';
 
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
