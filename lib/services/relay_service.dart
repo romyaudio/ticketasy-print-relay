@@ -157,23 +157,25 @@ class RelayService extends ChangeNotifier {
 
   void _doConnect() {
     if (_serverUrl == null || _token == null) return;
+    if (_isShuttingDown) return;
 
     _status = ConnectionStatus.connecting;
     _addLog('Conectando a servidor...');
     notifyListeners();
 
     try {
+      // Always destroy previous socket completely
       _socket?.dispose();
+      _socket = null;
 
+      // Create fresh socket - DISABLE auto reconnection (we handle it ourselves)
       _socket = IO.io(
         '$_serverUrl/print',
         IO.OptionBuilder()
             .setTransports(['websocket'])
             .setAuth({'token': _token!})
             .enableAutoConnect()
-            .enableReconnection()
-            .setReconnectionDelay(2000)
-            .setReconnectionDelayMax(5000)
+            .disableReconnection() // We handle reconnection manually
             .build(),
       );
 
@@ -190,46 +192,48 @@ class RelayService extends ChangeNotifier {
         notifyListeners();
       });
 
-      _socket!.onDisconnect((_) {
-        if (!_isShuttingDown) {
-          _addLog('Desconectado. Reconectando automáticamente...');
-          _status = ConnectionStatus.disconnected;
-          notifyListeners();
-        }
-      });
-
-      _socket!.onReconnect((_) {
-        _addLog('✅ Reconectado');
-        _status = ConnectionStatus.connected;
+      _socket!.onDisconnect((reason) {
+        if (_isShuttingDown) return;
+        _addLog('Desconectado ($reason)');
+        _status = ConnectionStatus.disconnected;
         notifyListeners();
-      });
-
-      _socket!.onReconnectAttempt((attempt) {
-        _addLog('Reintento de conexión #$attempt...');
+        // Always recreate connection after any disconnect
+        _scheduleReconnect();
       });
 
       _socket!.onConnectError((error) {
+        if (_isShuttingDown) return;
         _lastError = error.toString();
-        _addLog('Error de conexión: $_lastError');
+        _addLog('Error: $_lastError');
         _status = ConnectionStatus.error;
         notifyListeners();
+        // Retry on connection error
+        _scheduleReconnect();
       });
 
       _socket!.on('error', (data) {
         final message = data is Map ? (data['message'] ?? 'Error') : data.toString();
         _lastError = message;
         _addLog('Error: $_lastError');
-        _status = ConnectionStatus.error;
-        notifyListeners();
       });
 
       _setupPrintListeners();
     } catch (e) {
       _lastError = e.toString();
-      _addLog('Error de conexión: $_lastError');
+      _addLog('Error: $_lastError');
       _status = ConnectionStatus.error;
       notifyListeners();
+      _scheduleReconnect();
     }
+  }
+
+  void _scheduleReconnect() {
+    if (_isShuttingDown) return;
+    Future.delayed(const Duration(seconds: 3), () {
+      if (!_isShuttingDown && _status != ConnectionStatus.connected) {
+        _doConnect();
+      }
+    });
   }
 
   void _setupPrintListeners() {
