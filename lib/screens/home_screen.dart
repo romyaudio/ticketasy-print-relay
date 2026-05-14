@@ -6,6 +6,7 @@ import '../services/relay_service.dart';
 import '../services/config_service.dart';
 import '../services/printer_discovery.dart';
 import '../l10n/translations.dart';
+// agentVersion is in relay_service.dart
 
 class HomeScreen extends StatefulWidget {
   final RelayService relayService;
@@ -313,7 +314,7 @@ class _HomeScreenState extends State<HomeScreen> {
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(t('app.title'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF1A1A2E))),
+            Text('${t('app.title')} v$agentVersion', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF1A1A2E))),
             Text(t('app.subtitle'), style: const TextStyle(fontSize: 12, color: Color(0xFF4A4A6A))),
           ],
         ),

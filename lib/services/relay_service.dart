@@ -7,7 +7,7 @@ import 'printer_service.dart';
 
 enum ConnectionStatus { disconnected, connecting, connected, error }
 
-const String agentVersion = '1.0.0';
+const String agentVersion = '1.0.1';
 
 class RelayService extends ChangeNotifier {
   IO.Socket? _socket;
