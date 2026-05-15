@@ -59,6 +59,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: linux-build
@@ -86,5 +87,4 @@ jobs:
           gh release upload $(gh release list --limit 1 --json tagName -q '.[0].tagName') \
             TicketVentasPrint-Linux.tar.gz \
             TicketVentasPrint-Mac.zip \
-            --clobber \
-            --repo ${{ github.repository }}
+            --clobber
