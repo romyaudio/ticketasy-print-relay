@@ -1,20 +1,18 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
-import '../services/relay_service.dart';
+import '../services/local_server.dart';
 import '../services/config_service.dart';
 import '../services/printer_discovery.dart';
 import '../l10n/translations.dart';
-// agentVersion is in relay_service.dart
 
 class HomeScreen extends StatefulWidget {
-  final RelayService relayService;
+  final LocalPrintServer server;
   final ConfigService configService;
 
   const HomeScreen({
     super.key,
-    required this.relayService,
+    required this.server,
     required this.configService,
   });
 
@@ -23,11 +21,6 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final _codeController = TextEditingController();
-  final _addressController = TextEditingController();
-  bool _activating = false;
-  String? _activationError;
-
   // Printer discovery
   List<DiscoveredPrinter> _printers = [];
   List<DiscoveredPrinter> _networkPrinters = [];
@@ -36,26 +29,26 @@ class _HomeScreenState extends State<HomeScreen> {
   int _scanProgress = 0;
   DiscoveredPrinter? _selectedPrinter;
   bool _showManualIp = false;
+  final _addressController = TextEditingController();
 
-  RelayService get _relay => widget.relayService;
+  LocalPrintServer get _server => widget.server;
   ConfigService get _config => widget.configService;
 
   @override
   void initState() {
     super.initState();
-    _relay.addListener(_onRelayChange);
+    _server.addListener(_onServerChange);
     _discoverPrinters();
   }
 
   @override
   void dispose() {
-    _relay.removeListener(_onRelayChange);
-    _codeController.dispose();
+    _server.removeListener(_onServerChange);
     _addressController.dispose();
     super.dispose();
   }
 
-  void _onRelayChange() {
+  void _onServerChange() {
     if (mounted) setState(() {});
   }
 
@@ -65,8 +58,11 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _printers = printers;
       _loadingPrinters = false;
-      final defaultPrinter = printers.where((p) => p.isDefault).firstOrNull;
-      if (defaultPrinter != null) _selectedPrinter = defaultPrinter;
+      // Auto-select configured printer or default
+      if (_config.printerName != null) {
+        _selectedPrinter = printers.where((p) => p.name == _config.printerName).firstOrNull;
+      }
+      _selectedPrinter ??= printers.where((p) => p.isDefault).firstOrNull;
     });
   }
 
@@ -80,204 +76,36 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() { _networkPrinters = printers; _scanningNetwork = false; });
   }
 
-  Future<void> _handleActivate() async {
-    final code = _codeController.text.trim();
-    if (code.isEmpty) return;
-
-    // Validate printer selection
-    if (_selectedPrinter == null && !_showManualIp) {
-      setState(() { _activationError = t('setup.selectPrinter'); });
-      return;
-    }
-    if (_showManualIp && _addressController.text.trim().isEmpty) {
-      setState(() { _activationError = t('setup.enterIp'); });
-      return;
-    }
-
-    setState(() { _activating = true; _activationError = null; });
-
-    // Save printer config first
-    if (_showManualIp) {
+  Future<void> _savePrinter() async {
+    if (_showManualIp && _addressController.text.trim().isNotEmpty) {
       await _config.savePrinterConfig(type: 'NETWORK', address: _addressController.text.trim());
-      _relay.printerService.configure(type: 'NETWORK', address: _addressController.text.trim());
-    } else if (_selectedPrinter!.type == 'NETWORK') {
-      await _config.savePrinterConfig(type: 'NETWORK', address: _selectedPrinter!.address!);
-      _relay.printerService.configure(type: 'NETWORK', address: _selectedPrinter!.address!);
-    } else {
-      await _config.savePrinterConfig(type: 'USB', name: _selectedPrinter!.name);
-      _relay.printerService.configure(type: 'USB', name: _selectedPrinter!.name);
-    }
-
-    // Activate
-    final result = await _relay.activate(
-      serverUrl: _config.serverUrl,
-      setupCode: code,
-    );
-
-    if (result != null) {
-      await _config.saveActivation(
-        connectionToken: result['connectionToken'],
-        stationId: result['stationId'],
-        companyId: result['companyId'],
-        locationId: result['locationId'],
-      );
-
-      await launchAtStartup.enable();
-
-      if (_relay.status != ConnectionStatus.connected) {
-        _relay.connect(
-          serverUrl: _config.serverUrl,
-          token: result['connectionToken'],
-        );
+      _server.printerService.configure(type: 'NETWORK', address: _addressController.text.trim());
+    } else if (_selectedPrinter != null) {
+      if (_selectedPrinter!.type == 'NETWORK' && _selectedPrinter!.address != null) {
+        await _config.savePrinterConfig(type: 'NETWORK', address: _selectedPrinter!.address!);
+        _server.printerService.configure(type: 'NETWORK', address: _selectedPrinter!.address!);
+      } else {
+        await _config.savePrinterConfig(type: 'USB', name: _selectedPrinter!.name);
+        _server.printerService.configure(type: 'USB', name: _selectedPrinter!.name);
       }
-
-      _codeController.clear();
-      setState(() { _activating = false; });
-      return;
-    } else {
-      _activationError = _relay.lastError;
     }
-
-    setState(() { _activating = false; });
-  }
-
-  Future<void> _handleDisconnect() async {
-    _relay.disconnect();
-    await _config.clearAll();
-    await launchAtStartup.disable();
+    await launchAtStartup.enable();
     setState(() {});
-  }
-
-  Future<void> _showChangePrinterDialog() async {
-    // Refresh printer list
-    await _discoverPrinters();
-
-    if (!mounted) return;
-
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(t('dialog.changePrinter'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-        content: SizedBox(
-          width: 350,
-          child: StatefulBuilder(
-            builder: (context, setDialogState) {
-              return SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(t('dialog.selectNew'), style: const TextStyle(fontSize: 13, color: Color(0xFF4A4A6A))),
-                    const SizedBox(height: 12),
-                    if (_loadingPrinters)
-                      const Center(child: CircularProgressIndicator(strokeWidth: 2))
-                    else if (_printers.isEmpty)
-                      Text(t('setup.noprinters'), style: const TextStyle(color: Colors.grey, fontSize: 12))
-                    else
-                      ..._printers.map((printer) {
-                        final isSelected = _selectedPrinter?.name == printer.name;
-                        return GestureDetector(
-                          onTap: () => setDialogState(() { _selectedPrinter = printer; }),
-                          child: Container(
-                            margin: const EdgeInsets.only(bottom: 6),
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: isSelected ? const Color(0xFF1227DA).withValues(alpha: 0.08) : Colors.transparent,
-                              border: Border.all(color: isSelected ? const Color(0xFF1227DA) : Colors.grey.shade200),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Row(
-                              children: [
-                                Icon(Icons.print, size: 16, color: isSelected ? const Color(0xFF1227DA) : Colors.grey),
-                                const SizedBox(width: 10),
-                                Expanded(child: Text(printer.name, style: TextStyle(fontSize: 12, fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal))),
-                                if (isSelected) const Icon(Icons.check_circle, size: 16, color: Color(0xFF1227DA)),
-                              ],
-                            ),
-                          ),
-                        );
-                      }),
-                    const SizedBox(height: 8),
-                    // Network option
-                    if (_networkPrinters.isNotEmpty)
-                      ..._networkPrinters.map((printer) {
-                        final isSelected = _selectedPrinter?.name == printer.name;
-                        return GestureDetector(
-                          onTap: () => setDialogState(() { _selectedPrinter = printer; }),
-                          child: Container(
-                            margin: const EdgeInsets.only(bottom: 6),
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: isSelected ? const Color(0xFF1227DA).withValues(alpha: 0.08) : Colors.transparent,
-                              border: Border.all(color: isSelected ? const Color(0xFF1227DA) : Colors.grey.shade200),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Row(
-                              children: [
-                                Icon(Icons.wifi, size: 16, color: isSelected ? const Color(0xFF1227DA) : Colors.grey),
-                                const SizedBox(width: 10),
-                                Expanded(child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(printer.name, style: TextStyle(fontSize: 12, fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal)),
-                                    if (printer.address != null) Text(printer.address!, style: const TextStyle(fontSize: 10, color: Colors.grey)),
-                                  ],
-                                )),
-                                if (isSelected) const Icon(Icons.check_circle, size: 16, color: Color(0xFF1227DA)),
-                              ],
-                            ),
-                          ),
-                        );
-                      }),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(t('dialog.cancel')),
-          ),
-          ElevatedButton(
-            onPressed: _selectedPrinter != null ? () async {
-              if (_selectedPrinter!.type == 'NETWORK' && _selectedPrinter!.address != null) {
-                await _config.savePrinterConfig(type: 'NETWORK', address: _selectedPrinter!.address!);
-                _relay.printerService.configure(type: 'NETWORK', address: _selectedPrinter!.address!);
-              } else {
-                await _config.savePrinterConfig(type: 'USB', name: _selectedPrinter!.name);
-                _relay.printerService.configure(type: 'USB', name: _selectedPrinter!.name);
-              }
-              if (mounted) {
-                Navigator.pop(context);
-                setState(() {});
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('${t('dialog.printerChanged')} ${_selectedPrinter!.name}'), duration: const Duration(seconds: 2)),
-                );
-              }
-            } : null,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF1227DA),
-              foregroundColor: Colors.white,
-            ),
-            child: Text(t('dialog.save')),
-          ),
-        ],
-      ),
-    );
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(t('dialog.printerChanged')), duration: const Duration(seconds: 2)),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final isActivated = _config.isActivated;
     final theme = Theme.of(context);
+    final hasPrinter = _server.printerService.isConfigured;
 
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-        ),
+        color: Colors.white,
         child: SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -286,11 +114,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 _buildHeader(theme),
                 const SizedBox(height: 20),
                 Expanded(
-                  child: isActivated
-                      ? _buildConnectedView(theme)
+                  child: hasPrinter
+                      ? _buildRunningView(theme)
                       : _buildSetupView(theme),
                 ),
-                if (isActivated) _buildLogs(theme),
+                _buildLogs(theme),
               ],
             ),
           ),
@@ -327,16 +155,12 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildStatusBadge() {
     Color color;
     String label;
-    switch (_relay.status) {
-      case ConnectionStatus.connected:
+    switch (_server.status) {
+      case ServerStatus.running:
         color = Colors.green;
         label = t('status.connected');
         break;
-      case ConnectionStatus.connecting:
-        color = Colors.orange;
-        label = t('status.connecting');
-        break;
-      case ConnectionStatus.error:
+      case ServerStatus.error:
         color = Colors.red;
         label = t('status.error');
         break;
@@ -364,7 +188,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // =========================================================================
-  // SETUP VIEW (not activated)
+  // SETUP VIEW (no printer configured)
   // =========================================================================
 
   Widget _buildSetupView(ThemeData theme) {
@@ -372,30 +196,185 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Step 1: Select printer
           _buildStepHeader('1', t('setup.step1'), theme),
           const SizedBox(height: 12),
           _buildPrinterSelection(theme),
-          const SizedBox(height: 24),
-
-          // Step 2: Enter code
-          _buildStepHeader('2', t('setup.step2'), theme),
-          const SizedBox(height: 12),
-          _buildCodeInput(theme),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: (_selectedPrinter != null || (_showManualIp && _addressController.text.trim().isNotEmpty))
+                  ? _savePrinter
+                  : null,
+              icon: const Icon(Icons.save),
+              label: Text(t('dialog.save')),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1227DA),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 13),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+            ),
+          ),
         ],
       ),
     );
   }
+
+  // =========================================================================
+  // RUNNING VIEW (printer configured, server running)
+  // =========================================================================
+
+  Widget _buildRunningView(ThemeData theme) {
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Update banner
+          if (_server.updateAvailable != null)
+            Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.orange.shade300),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.system_update, size: 18, color: Colors.orange),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '${t('update.available')} v${_server.updateAvailable}',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF1A1A2E)),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      Process.run('cmd', ['/c', 'start', 'https://github.com/romyaudio/ticketasy-print-relay/releases/latest']);
+                    },
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      minimumSize: Size.zero,
+                    ),
+                    child: Text(t('update.download'), style: const TextStyle(fontSize: 11)),
+                  ),
+                ],
+              ),
+            ),
+
+          // Status card
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: _server.isRunning ? Colors.green.shade50 : Colors.red.shade50,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: _server.isRunning ? Colors.green.shade200 : Colors.red.shade200),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      _server.isRunning ? Icons.check_circle : Icons.error,
+                      color: _server.isRunning ? Colors.green : Colors.red,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _server.isRunning ? t('connected.title') : t('status.error'),
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '${t('connected.printer')}: ${_config.printerName ?? _config.printerAddress ?? t('printer.configured')}',
+                  style: const TextStyle(fontSize: 12, color: Color(0xFF4A4A6A)),
+                ),
+                Text(
+                  'Puerto: ${_server.port} • Clientes: ${_server.activeConnections}',
+                  style: const TextStyle(fontSize: 11, color: Color(0xFF4A4A6A)),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // Actions
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => _showChangePrinterDialog(),
+                  icon: const Icon(Icons.print, size: 16),
+                  label: Text(t('connected.changePrinter'), style: const TextStyle(fontSize: 12)),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () async {
+                    await _server.stop();
+                    await _config.clearAll();
+                    await launchAtStartup.disable();
+                    _server.printerService.configure(type: '', name: null, address: null);
+                    setState(() {});
+                  },
+                  icon: const Icon(Icons.link_off, size: 16, color: Colors.red),
+                  label: Text(t('connected.disconnect'), style: const TextStyle(fontSize: 12, color: Colors.red)),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    side: const BorderSide(color: Colors.red),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // Info box
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade50,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.blue.shade200),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.info_outline, size: 14, color: Colors.blue),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    t('connected.success.message'),
+                    style: const TextStyle(fontSize: 11, color: Colors.black87, height: 1.4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================================
+  // SHARED WIDGETS
+  // =========================================================================
 
   Widget _buildStepHeader(String number, String title, ThemeData theme) {
     return Row(
       children: [
         Container(
           width: 24, height: 24,
-          decoration: BoxDecoration(
-            color: theme.colorScheme.primary,
-            shape: BoxShape.circle,
-          ),
+          decoration: BoxDecoration(color: theme.colorScheme.primary, shape: BoxShape.circle),
           child: Center(child: Text(number, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
         ),
         const SizedBox(width: 10),
@@ -414,7 +393,6 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // System printers header
           Row(
             children: [
               const Icon(Icons.print, size: 16, color: Colors.grey),
@@ -424,15 +402,12 @@ class _HomeScreenState extends State<HomeScreen> {
               IconButton(
                 icon: const Icon(Icons.refresh, size: 16),
                 onPressed: _discoverPrinters,
-                tooltip: 'Actualizar',
                 constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
                 padding: EdgeInsets.zero,
               ),
             ],
           ),
           const SizedBox(height: 8),
-
-          // System printers list
           if (_loadingPrinters)
             const Center(child: Padding(padding: EdgeInsets.all(12), child: CircularProgressIndicator(strokeWidth: 2)))
           else if (_printers.isEmpty)
@@ -443,7 +418,6 @@ class _HomeScreenState extends State<HomeScreen> {
           else
             ...(_printers.map((printer) => _buildPrinterTile(printer, theme))),
 
-          // Network printers section
           const Divider(height: 24),
           Row(
             children: [
@@ -456,15 +430,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   onPressed: _scanNetwork,
                   icon: const Icon(Icons.search, size: 14),
                   label: Text(t('setup.networkSearch'), style: const TextStyle(fontSize: 11)),
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    minimumSize: Size.zero,
-                  ),
+                  style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), minimumSize: Size.zero),
                 ),
             ],
           ),
           const SizedBox(height: 8),
-
           if (_scanningNetwork)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
@@ -478,13 +448,12 @@ class _HomeScreenState extends State<HomeScreen> {
             )
           else if (_networkPrinters.isNotEmpty)
             ...(_networkPrinters.map((printer) => _buildPrinterTile(printer, theme)))
-          else if (_networkPrinters.isEmpty && !_scanningNetwork)
+          else
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 4),
               child: Text(t('setup.networkHint'), style: const TextStyle(color: Color(0xFF4A4A6A), fontSize: 11)),
             ),
 
-          // Manual IP option
           const Divider(height: 24),
           GestureDetector(
             onTap: () => setState(() { _showManualIp = !_showManualIp; _selectedPrinter = null; }),
@@ -511,7 +480,6 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ],
 
-          // Compatibility note
           const Divider(height: 24),
           Container(
             padding: const EdgeInsets.all(10),
@@ -525,40 +493,7 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 const Icon(Icons.info_outline, size: 14, color: Colors.blue),
                 const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    t('help.compatibility'),
-                    style: const TextStyle(fontSize: 10, color: Colors.black87, height: 1.5),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          // Help section
-          const Divider(height: 24),
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: Colors.amber.shade50,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.amber.shade200),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.help_outline, size: 14, color: Colors.amber),
-                    const SizedBox(width: 6),
-                    Text(t('help.title'), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '• ${t('help.usb')}\n• ${t('help.wifi')}\n• ${t('help.manual')}',
-                  style: const TextStyle(fontSize: 10, color: Colors.black87, height: 1.5),
-                ),
+                Expanded(child: Text(t('help.compatibility'), style: const TextStyle(fontSize: 10, color: Colors.black87, height: 1.5))),
               ],
             ),
           ),
@@ -608,202 +543,91 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildCodeInput(ThemeData theme) {
+  Widget _buildLogs(ThemeData theme) {
+    final logs = _server.logs;
+    if (logs.isEmpty) return const SizedBox.shrink();
+
     return Container(
-      padding: const EdgeInsets.all(14),
+      height: 120,
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: Colors.blue.shade50,
-        border: Border.all(color: Colors.blue.shade200),
-        borderRadius: BorderRadius.circular(12),
+        color: const Color(0xFF1A1A2E),
+        borderRadius: BorderRadius.circular(8),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(t('setup.codeInfo'), style: const TextStyle(fontSize: 12, color: Color(0xFF2A4A7A))),
-          const SizedBox(height: 4),
-          Text(t('setup.codePath'), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: theme.colorScheme.primary)),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _codeController,
-            decoration: InputDecoration(
-              hintText: t('setup.codeHint'),
-              labelText: t('setup.codeLabel'),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-              prefixIcon: const Icon(Icons.vpn_key, size: 18),
-              filled: true,
-              fillColor: Colors.white,
-            ),
-            textCapitalization: TextCapitalization.characters,
-            inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[A-Z0-9\-]'))],
-          ),
-          const SizedBox(height: 10),
-
-          if (_activationError != null)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(_activationError!, style: const TextStyle(color: Colors.red, fontSize: 12)),
-            ),
-
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: _activating ? null : _handleActivate,
-              icon: _activating
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.link),
-              label: Text(_activating ? t('setup.connecting') : t('setup.connect')),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF1227DA),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 13),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-              ),
-            ),
-          ),
-        ],
+      child: ListView.builder(
+        reverse: true,
+        itemCount: logs.length,
+        itemBuilder: (context, index) {
+          final log = logs[logs.length - 1 - index];
+          return Text(log, style: const TextStyle(fontSize: 10, color: Color(0xFF8888AA), fontFamily: 'Consolas', height: 1.5));
+        },
       ),
     );
   }
 
-  // =========================================================================
-  // CONNECTED VIEW
-  // =========================================================================
+  Future<void> _showChangePrinterDialog() async {
+    await _discoverPrinters();
+    if (!mounted) return;
 
-  Widget _buildConnectedView(ThemeData theme) {
-    return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Update banner
-          if (_relay.updateAvailable != null)
-            Container(
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.orange.shade50,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.orange.shade300),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.system_update, size: 18, color: Colors.orange),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      '${t('update.available')} v${_relay.updateAvailable}',
-                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF1A1A2E)),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () {
-                      // Open GitHub releases page
-                      Process.run('cmd', ['/c', 'start', 'https://github.com/romyaudio/ticketasy-print-relay/releases/latest']);
-                    },
-                    style: TextButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      minimumSize: Size.zero,
-                    ),
-                    child: Text(t('update.download'), style: const TextStyle(fontSize: 11)),
-                  ),
-                ],
-              ),
-            ),
-
-          // Status card
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.green.shade50,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.green.shade200),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(t('dialog.changePrinter'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        content: SizedBox(
+          width: 350,
+          child: StatefulBuilder(
+            builder: (context, setDialogState) {
+              return SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Icon(Icons.check_circle, color: Colors.green, size: 20),
-                    const SizedBox(width: 8),
-                    Text(t('connected.title'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                    Text(t('dialog.selectNew'), style: const TextStyle(fontSize: 13, color: Color(0xFF4A4A6A))),
+                    const SizedBox(height: 12),
+                    if (_loadingPrinters)
+                      const Center(child: CircularProgressIndicator(strokeWidth: 2))
+                    else if (_printers.isEmpty)
+                      Text(t('setup.noprinters'), style: const TextStyle(color: Colors.grey, fontSize: 12))
+                    else
+                      ..._printers.map((printer) {
+                        final isSelected = _selectedPrinter?.name == printer.name;
+                        return GestureDetector(
+                          onTap: () => setDialogState(() { _selectedPrinter = printer; }),
+                          child: Container(
+                            margin: const EdgeInsets.only(bottom: 6),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: isSelected ? const Color(0xFF1227DA).withValues(alpha: 0.08) : Colors.transparent,
+                              border: Border.all(color: isSelected ? const Color(0xFF1227DA) : Colors.grey.shade200),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(Icons.print, size: 16, color: isSelected ? const Color(0xFF1227DA) : Colors.grey),
+                                const SizedBox(width: 10),
+                                Expanded(child: Text(printer.name, style: TextStyle(fontSize: 12, fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal))),
+                                if (isSelected) const Icon(Icons.check_circle, size: 16, color: Color(0xFF1227DA)),
+                              ],
+                            ),
+                          ),
+                        );
+                      }),
                   ],
                 ),
-                const SizedBox(height: 8),
-                Text('${t('connected.printer')}: ${_config.printerName ?? _config.printerAddress ?? t('printer.configured')}', style: const TextStyle(fontSize: 12, color: Color(0xFF4A4A6A))),
-                Text('${t('connected.station')}: ${_config.stationId ?? "N/A"}', style: const TextStyle(fontSize: 11, color: Color(0xFF4A4A6A))),
-              ],
-            ),
+              );
+            },
           ),
-          const SizedBox(height: 16),
-
-          // Change printer button
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: _showChangePrinterDialog,
-              icon: const Icon(Icons.print, size: 18),
-              label: Text(t('connected.changePrinter')),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: const Color(0xFF1227DA),
-                side: const BorderSide(color: Color(0xFF1227DA)),
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          // Disconnect
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: _handleDisconnect,
-              icon: const Icon(Icons.link_off, size: 18),
-              label: Text(t('connected.disconnect')),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: Colors.red,
-                side: const BorderSide(color: Colors.red),
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // =========================================================================
-  // LOGS
-  // =========================================================================
-
-  Widget _buildLogs(ThemeData theme) {
-    return Container(
-      margin: const EdgeInsets.only(top: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.green.shade50,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.green.shade200),
-      ),
-      child: Column(
-        children: [
-          const Icon(Icons.check_circle_outline, color: Colors.green, size: 32),
-          const SizedBox(height: 10),
-          Text(
-            t('connected.success.title'),
-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Color(0xFF1A1A2E)),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            t('connected.success.message'),
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF4A4A6A)),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            t('connected.success.hint'),
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 11, color: Color(0xFF6A6A8A)),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text(t('dialog.cancel'))),
+          ElevatedButton(
+            onPressed: _selectedPrinter != null ? () async {
+              await _savePrinter();
+              if (mounted) Navigator.pop(context);
+            } : null,
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1227DA), foregroundColor: Colors.white),
+            child: Text(t('dialog.save')),
           ),
         ],
       ),

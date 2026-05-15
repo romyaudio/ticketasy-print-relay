@@ -5,11 +5,26 @@ import 'package:launch_at_startup/launch_at_startup.dart';
 import 'dart:io';
 
 import 'screens/home_screen.dart';
-import 'services/relay_service.dart';
+import 'services/local_server.dart';
 import 'services/config_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Single instance check - prevent multiple agents running
+  final lockFile = File('${Directory.systemTemp.path}/ticketventas_print.lock');
+  try {
+    if (await lockFile.exists()) {
+      final pid = await lockFile.readAsString();
+      try {
+        final result = await Process.run('tasklist', ['/FI', 'PID eq $pid', '/NH']);
+        if ((result.stdout as String).contains(pid.trim())) {
+          exit(0);
+        }
+      } catch (_) {}
+    }
+    await lockFile.writeAsString('${pid}');
+  } catch (_) {}
 
   // Window manager setup
   await windowManager.ensureInitialized();
@@ -68,7 +83,7 @@ class MainWindow extends StatefulWidget {
 
 class _MainWindowState extends State<MainWindow> with WindowListener {
   final SystemTray _systemTray = SystemTray();
-  final RelayService _relayService = RelayService();
+  final LocalPrintServer _server = LocalPrintServer();
   final ConfigService _configService = ConfigService();
   bool _initialized = false;
 
@@ -82,35 +97,38 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
   @override
   void dispose() {
     windowManager.removeListener(this);
-    _relayService.disconnect();
+    _server.stop();
     super.dispose();
   }
 
   /// Minimize to tray instead of closing
   @override
   void onWindowClose() async {
-    // Prevent the window from actually closing - just hide it
     await windowManager.setPreventClose(true);
     await windowManager.hide();
   }
 
   Future<void> _initApp() async {
     await _configService.init();
-    
-    // System tray (best-effort, don't block if it fails)
+
+    // Configure printer if already set up
+    if (_configService.printerType != null) {
+      _server.printerService.configure(
+        type: _configService.printerType!,
+        address: _configService.printerAddress,
+        name: _configService.printerName,
+      );
+    }
+
+    // System tray
     try {
       await _initSystemTray();
     } catch (e) {
       debugPrint('System tray init failed: $e');
     }
-    
-    // Auto-connect if already activated
-    if (_configService.isActivated) {
-      _relayService.connect(
-        serverUrl: _configService.serverUrl,
-        token: _configService.connectionToken!,
-      );
-    }
+
+    // Auto-start the local server
+    await _server.start();
 
     setState(() { _initialized = true; });
   }
@@ -130,7 +148,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       }),
       MenuSeparator(),
       MenuItemLabel(label: 'Salir', onClicked: (menuItem) async {
-        _relayService.disconnect();
+        await _server.stop();
         await windowManager.setPreventClose(false);
         await windowManager.destroy();
       }),
@@ -154,7 +172,7 @@ class _MainWindowState extends State<MainWindow> with WindowListener {
       );
     }
     return HomeScreen(
-      relayService: _relayService,
+      server: _server,
       configService: _configService,
     );
   }

@@ -1,4 +1,4 @@
-name: Build & Release
+name: Build Mac & Linux
 
 on:
   workflow_dispatch:
@@ -19,6 +19,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libayatana-appindicator3-dev
+      - name: Get dependencies
+        run: flutter pub get
       - name: Build Linux
         run: flutter build linux --release --dart-define=ENV=prod
       - name: Package Linux
@@ -38,6 +40,8 @@ jobs:
         with:
           flutter-version: "3.35.7"
           channel: "stable"
+      - name: Get dependencies
+        run: flutter pub get
       - name: Build macOS
         run: flutter build macos --release --dart-define=ENV=prod
       - name: Package macOS
@@ -49,10 +53,9 @@ jobs:
           name: macos-build
           path: TicketVentasPrint-Mac.zip
 
-  release:
+  upload-to-release:
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
@@ -62,16 +65,26 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: macos-build
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - name: Upload to existing release (tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             TicketVentasPrint-Linux.tar.gz
             TicketVentasPrint-Mac.zip
+          append_body: true
           body: |
-            Ticket Ventas Print - Agente de impresión silenciosa
-
-            Compatible con impresoras Epson.
-
-            - **Linux**: Descomprimir y ejecutar `./ticketventas_print`
+            ---
+            ### Mac & Linux
             - **macOS**: Descomprimir y mover a Aplicaciones
+            - **Linux**: Descomprimir y ejecutar `./ticketventas_print`
+      - name: Upload to latest release (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload $(gh release list --limit 1 --json tagName -q '.[0].tagName') \
+            TicketVentasPrint-Linux.tar.gz \
+            TicketVentasPrint-Mac.zip \
+            --clobber \
+            --repo ${{ github.repository }}
