@@ -7,7 +7,7 @@ import 'printer_service.dart';
 
 enum ServerStatus { stopped, running, error }
 
-const String agentVersion = '1.0.4';
+const String agentVersion = '1.0.5';
 const int defaultPort = 12345;
 
 /// Allowed origins that can connect to the local print server

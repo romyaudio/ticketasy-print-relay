@@ -29,6 +29,7 @@ class _HomeScreenState extends State<HomeScreen> {
   int _scanProgress = 0;
   DiscoveredPrinter? _selectedPrinter;
   bool _showManualIp = false;
+  String _printerMode = 'THERMAL'; // 'THERMAL' or 'STANDARD'
   final _addressController = TextEditingController();
 
   LocalPrintServer get _server => widget.server;
@@ -81,7 +82,11 @@ class _HomeScreenState extends State<HomeScreen> {
       await _config.savePrinterConfig(type: 'NETWORK', address: _addressController.text.trim());
       _server.printerService.configure(type: 'NETWORK', address: _addressController.text.trim());
     } else if (_selectedPrinter != null) {
-      if (_selectedPrinter!.type == 'NETWORK' && _selectedPrinter!.address != null) {
+      if (_printerMode == 'STANDARD') {
+        // Standard printer (HTML-based)
+        await _config.savePrinterConfig(type: 'STANDARD', name: _selectedPrinter!.name);
+        _server.printerService.configure(type: 'STANDARD', name: _selectedPrinter!.name);
+      } else if (_selectedPrinter!.type == 'NETWORK' && _selectedPrinter!.address != null) {
         await _config.savePrinterConfig(type: 'NETWORK', address: _selectedPrinter!.address!);
         _server.printerService.configure(type: 'NETWORK', address: _selectedPrinter!.address!);
       } else {
@@ -393,6 +398,53 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Printer mode selector
+          Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => setState(() { _printerMode = 'THERMAL'; }),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    decoration: BoxDecoration(
+                      color: _printerMode == 'THERMAL' ? const Color(0xFF1227DA).withValues(alpha: 0.1) : Colors.transparent,
+                      border: Border.all(color: _printerMode == 'THERMAL' ? const Color(0xFF1227DA) : Colors.grey.shade300),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      children: [
+                        Icon(Icons.receipt_long, size: 20, color: _printerMode == 'THERMAL' ? const Color(0xFF1227DA) : Colors.grey),
+                        const SizedBox(height: 4),
+                        Text(t('setup.thermal'), style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: _printerMode == 'THERMAL' ? const Color(0xFF1227DA) : Colors.grey)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => setState(() { _printerMode = 'STANDARD'; }),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    decoration: BoxDecoration(
+                      color: _printerMode == 'STANDARD' ? const Color(0xFF1227DA).withValues(alpha: 0.1) : Colors.transparent,
+                      border: Border.all(color: _printerMode == 'STANDARD' ? const Color(0xFF1227DA) : Colors.grey.shade300),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      children: [
+                        Icon(Icons.print, size: 20, color: _printerMode == 'STANDARD' ? const Color(0xFF1227DA) : Colors.grey),
+                        const SizedBox(height: 4),
+                        Text(t('setup.standard'), style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: _printerMode == 'STANDARD' ? const Color(0xFF1227DA) : Colors.grey)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
           Row(
             children: [
               const Icon(Icons.print, size: 16, color: Colors.grey),

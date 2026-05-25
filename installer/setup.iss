@@ -1,6 +1,6 @@
 [Setup]
 AppName=Ticket Ventas Print
-AppVersion=1.0.4
+AppVersion=1.0.5
 AppPublisher=Ticket Ventas
 AppPublisherURL=https://ticketventas.com
 DefaultDirName={autopf}\Ticket Ventas Print
